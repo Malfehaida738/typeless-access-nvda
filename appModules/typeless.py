@@ -1,3 +1,8 @@
+# Typeless Access - NVDA add-on
+# Copyright (C) 2026 Mohammed Alfehaida
+# This file is covered by the GNU General Public License, version 2 or later.
+# See the file LICENSE for more details.
+
 # -*- coding: utf-8 -*-
 # Typeless Access - app module for the Typeless main window.
 # Adds: a list of all controls with clear names (NVDA+Alt+E),
