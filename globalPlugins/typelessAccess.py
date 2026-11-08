@@ -1,3 +1,8 @@
+# Typeless Access - NVDA add-on
+# Copyright (C) 2026 Mohammed Alfehaida
+# This file is covered by the GNU General Public License, version 2 or later.
+# See the file LICENSE for more details.
+
 # -*- coding: utf-8 -*-
 # Typeless Access - global part.
 # Watches the Typeless microphone (Windows privacy registry) to announce dictation start/stop,
