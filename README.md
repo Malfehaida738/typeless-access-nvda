@@ -41,4 +41,4 @@ That key belongs to Typeless. In Typeless Settings, under Keyboard shortcuts, ac
 Mohammed Alfehaida, malfehaida@gmail.com
 
 ## License
-MIT
+GNU General Public License, version 2 or later (GPL-2.0-or-later). See the LICENSE file.
