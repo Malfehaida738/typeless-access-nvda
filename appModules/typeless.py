@@ -51,6 +51,109 @@ SIDEBAR_ICONS = [
 ]
 
 
+def _typelessRoot():
+	"""The web document of the Typeless window. The top-level window object has no children
+	to walk in Typeless 2.11, so go to the Chromium render widget (or climb from the focus)."""
+	try:
+		import ctypes
+		import winUser
+		from NVDAObjects.IAccessible import getNVDAObjectFromEvent
+		hwnd = winUser.getForegroundWindow()
+		child = ctypes.windll.user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None)
+		if child:
+			obj = getNVDAObjectFromEvent(child, winUser.OBJID_CLIENT, 0)
+			if obj is not None:
+				return obj
+	except Exception:
+		log.debugWarning("TypelessAccess: render widget lookup failed", exc_info=True)
+	try:
+		node = api.getFocusObject()
+		last = None
+		n = 0
+		while node is not None and n < 60:
+			n += 1
+			if node.role == Role.DOCUMENT:
+				return node
+			last = node
+			node = node.parent
+		if last is not None:
+			return last
+	except Exception:
+		pass
+	return api.getForegroundObject()
+
+
+NAV_TEXT = {
+	"home": ("home", "الرئيسية (Home)"),
+	"history": ("history", "السجل (History)"),
+	"dictionary": ("dictionary", "القاموس (Dictionary)"),
+}
+
+
+def _nodeText(obj, depth=0):
+	"""All the texts inside a control (Typeless 2.11 left the sidebar buttons without a name)."""
+	parts = []
+	try:
+		child = obj.firstChild
+	except Exception:
+		child = None
+	n = 0
+	while child is not None and n < 20:
+		n += 1
+		try:
+			nm = (child.name or "").strip()
+		except Exception:
+			nm = ""
+		if nm:
+			parts.append(nm)
+		elif depth < 3:
+			sub = _nodeText(child, depth + 1)
+			if sub:
+				parts.append(sub)
+		try:
+			child = child.next
+		except Exception:
+			child = None
+	return " ".join(parts).strip()
+
+
+def _navFromText(obj):
+	try:
+		txt = _nodeText(obj)
+	except Exception:
+		return None
+	return NAV_TEXT.get(txt.lower())
+
+
+def _dumpTree(root, limit=90):
+	"""Write the controls of the window to the NVDA log (to diagnose a new Typeless version)."""
+	lines = []
+	stack = [(root, 0)]
+	count = 0
+	while stack and count < limit:
+		node, depth = stack.pop()
+		count += 1
+		try:
+			role = node.role
+			name = (node.name or "").strip()
+			loc = node.location
+		except Exception:
+			continue
+		if role in CONTROL_ROLES or name:
+			lines.append("%s%s | %s | %s | %s" % ("  " * min(depth, 6), role, name[:50], (_nodeText(node)[:40] if role in CONTROL_ROLES and not name else ""), tuple(loc) if loc else None))
+		try:
+			kids = []
+			child = node.firstChild
+			while child is not None and len(kids) < 100:
+				kids.append(child)
+				child = child.next
+			for k in reversed(kids):
+				stack.append((k, depth + 1))
+		except Exception:
+			continue
+	log.info("TypelessAccess tree dump:\n" + "\n".join(lines))
+
+
 def _shorten(text, words=7):
 	parts = text.split()
 	if len(parts) <= words:
@@ -91,7 +194,7 @@ class _Collector(object):
 		if role in CONTROL_ROLES:
 			self._addControl(obj, role, name)
 			return
-		if role == Role.STATICTEXT and name == "Check for updates":
+		if name == "Check for updates" and role not in CONTROL_ROLES:
 			self.items.append({"label": "البحث عن تحديثات (Check for updates)", "obj": obj, "key": "updates", "role": Role.BUTTON})
 			return
 		if role == Role.STATICTEXT and name:
@@ -126,7 +229,7 @@ class _Collector(object):
 		if name:
 			label = name
 			if role == Role.BUTTON:
-				key = {"Home": "home", "History": "history", "Dictionary": "dictionary", HELP_NAME: "help"}.get(name)
+				key = {"Home": "home", "History": "history", "Dictionary": "dictionary", HELP_NAME: "help", "Check for updates": "updates"}.get(name) or {i[1]: i[0] for i in SIDEBAR_ICONS}.get(name)
 				if name == HELP_NAME:
 					label = "المساعدة وميزات البرنامج وملاحظات الإصدار (Help)"
 				elif name == "Add another" and context:
@@ -134,6 +237,9 @@ class _Collector(object):
 			return label, key
 		# Unnamed controls
 		if role == Role.BUTTON:
+			nav = _navFromText(obj)
+			if nav:
+				return nav[1], nav[0]
 			sidebar = self._sidebarIcon(obj)
 			if sidebar:
 				return sidebar[1], sidebar[0]
@@ -311,12 +417,20 @@ def _sidebarIcon(obj, root=None):
 				if s == obj and i < len(SIDEBAR_ICONS):
 					result = SIDEBAR_ICONS[i]
 					break
+		elif len(siblings) == 4 and all(o.location and o.location[2] <= 100 for o in siblings):
+			# Typeless 2.11: the Help button has no name any more, so there are 4 unnamed icons.
+			siblings.sort(key=lambda o: o.location[0])
+			icons = SIDEBAR_ICONS + [("help", "المساعدة (Help)")]
+			for i, s in enumerate(siblings):
+				if s == obj:
+					result = icons[i]
+					break
 	except Exception:
 		result = None
 	if result is None:
 		if root is None:
 			try:
-				root = api.getForegroundObject()
+				root = _typelessRoot()
 			except Exception:
 				root = None
 		try:
@@ -663,14 +777,16 @@ class AppModule(appModuleHandler.AppModule):
 		try:
 			role = obj.role
 			if role == Role.DOCUMENT:
-				clsList.insert(0, TypelessDocument)
+				from NVDAObjects.IAccessible import IAccessible as _IA2Base
+				if isinstance(obj, _IA2Base):
+					clsList.insert(0, TypelessDocument)
 			elif role == Role.BUTTON and not _rawName(obj):
 				clsList.insert(0, SidebarIconButton)
 		except Exception:
 			log.debugWarning("TypelessAccess overlay", exc_info=True)
 
 	def _collect(self):
-		root = api.getForegroundObject()
+		root = _typelessRoot()
 		collector = _Collector()
 		collector.walk(root)
 		return collector.items
@@ -689,10 +805,18 @@ class AppModule(appModuleHandler.AppModule):
 				except Exception:
 					ui.message("تعذر فتح " + spoken)
 				return
+		try:
+			_dumpTree(_typelessRoot())
+		except Exception:
+			log.debugWarning("Typeless Access: dump failed", exc_info=True)
 		ui.message("لم أجد " + spoken + " في هذه الشاشة")
 
 	@script(description="Typeless: قائمة بكل عناصر النافذة بأسماء واضحة", gesture="kb:NVDA+alt+e", category=CATEGORY)
 	def script_elementsList(self, gesture):
+		try:
+			_dumpTree(_typelessRoot())
+		except Exception:
+			log.debugWarning("Typeless Access: dump failed", exc_info=True)
 		try:
 			items = self._collect()
 		except Exception:
@@ -745,21 +869,41 @@ class AppModule(appModuleHandler.AppModule):
 
 	@script(description="Typeless: البحث عن تحديثات (Check for updates)", gesture="kb:alt+8", category=CATEGORY)
 	def script_checkUpdates(self, gesture):
+		done = None
 		try:
-			done = _clickTextControl(api.getForegroundObject(), "Check for updates")
+			for item in self._collect():
+				if item["key"] == "updates":
+					target = item["obj"]
+					done = False
+					for attempt in range(4):
+						if target is None:
+							break
+						try:
+							target.doAction()
+							done = True
+							break
+						except Exception:
+							pass
+						try:
+							target = target.parent
+						except Exception:
+							target = None
+					break
+			if done is None:
+				done = _clickTextControl(_typelessRoot(), "Check for updates")
 		except Exception:
 			done = False
 		if done:
 			ui.message("جارٍ البحث عن تحديثات")
 		elif done is None:
-			ui.message("لم أجد Check for updates. افتح الصفحة الرئيسية أولاً بـ Alt مع 1")
+			ui.message("لم أجد Check for updates. افتح الإعدادات بـ Alt مع 4 ثم تبويب About")
 		else:
 			ui.message("تعذر الضغط على Check for updates")
 
 	@script(description="Typeless: قراءة إحصاءاتك والسلاسل (Streaks)", gesture="kb:alt+9", category=CATEGORY)
 	def script_readStats(self, gesture):
 		try:
-			parts = _statsSummary(api.getForegroundObject())
+			parts = _statsSummary(_typelessRoot())
 		except Exception:
 			log.debugWarning("TypelessAccess stats", exc_info=True)
 			parts = []
