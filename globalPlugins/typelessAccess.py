@@ -22,6 +22,7 @@ import ui
 import tones
 import core
 import controlTypes
+import textInfos
 from scriptHandler import script
 from logHandler import log
 
@@ -74,7 +75,7 @@ _kernel32.GlobalLock.restype = wintypes.LPVOID
 _kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 _kernel32.GlobalUnlock.restype = wintypes.BOOL
 CF_UNICODETEXT = 13
-CAPTURE_SECONDS = 20
+CAPTURE_SECONDS = 90
 
 
 def _readClipboardText():
@@ -160,7 +161,23 @@ def _findTypelessWindow(title):
 	return found[0] if found else None
 
 
-def _typelessMicOn(cache):
+def _statusExpanded(holder):
+	"""True while Typeless shows its large dictation overlay (Typeless 2.11 no longer
+	updates the Windows microphone record); False when it is the small idle icon; None if absent."""
+	hwnd = holder.get("hwnd")
+	if not hwnd or not _user32.IsWindow(hwnd):
+		hwnd = _findTypelessWindow("Status")
+		holder["hwnd"] = hwnd
+	if not hwnd:
+		return None
+	if not _user32.IsWindowVisible(hwnd):
+		return False
+	rect = wintypes.RECT()
+	_user32.GetWindowRect(hwnd, ctypes.byref(rect))
+	return (rect.right - rect.left) > 200
+
+
+def _registryMicOn(cache):
 	"""True if Typeless is using the microphone now, False if not, None if unknown."""
 	try:
 		with winreg.OpenKey(winreg.HKEY_CURRENT_USER, MIC_PATH) as root:
@@ -196,6 +213,145 @@ def _typelessMicOn(cache):
 		return None
 
 
+_pidCache = {}
+
+
+def _typelessWindowsState():
+	"""Title, visibility and size of every top-level Typeless window (to find a recording signal)."""
+	rows = []
+
+	def callback(hwnd, lParam):
+		try:
+			pid = wintypes.DWORD()
+			_user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+			ok = _pidCache.get(pid.value)
+			if ok is None:
+				try:
+					nm = appModuleHandler.getAppNameFromProcessID(pid.value)
+				except Exception:
+					nm = ""
+				ok = bool(nm) and nm.lower().startswith("typeless")
+				_pidCache[pid.value] = ok
+			if ok:
+				rect = wintypes.RECT()
+				_user32.GetWindowRect(hwnd, ctypes.byref(rect))
+				rows.append("%s|vis=%s|%sx%s@%s,%s" % (
+					_windowText(hwnd) or "(no title)", bool(_user32.IsWindowVisible(hwnd)),
+					rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top))
+		except Exception:
+			pass
+		return True
+
+	_user32.EnumWindows(_EnumWindowsProc(callback), 0)
+	return tuple(sorted(rows))
+
+
+_tlHwnd = [None]
+
+
+def _typelessAlive():
+	"""Cheap check that Typeless is running: remember one of its windows and test it."""
+	h = _tlHwnd[0]
+	if h and _user32.IsWindow(h):
+		return True
+	_tlHwnd[0] = None
+	found = []
+
+	def callback(hwnd, lParam):
+		try:
+			pid = wintypes.DWORD()
+			_user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+			ok = _pidCache.get(pid.value)
+			if ok is None:
+				try:
+					nm = appModuleHandler.getAppNameFromProcessID(pid.value)
+				except Exception:
+					nm = ""
+				ok = bool(nm) and nm.lower().startswith("typeless")
+				_pidCache[pid.value] = ok
+			if ok:
+				found.append(hwnd)
+				return False
+		except Exception:
+			pass
+		return True
+
+	_user32.EnumWindows(_EnumWindowsProc(callback), 0)
+	if found:
+		_tlHwnd[0] = found[0]
+		return True
+	return False
+
+
+def _activeMicKeys():
+	"""Names of every app that is using the microphone right now (stop time 0)."""
+	active = set()
+	for path in (MIC_PATH, MIC_PATH.replace("NonPackaged", "")[:-1]):
+		try:
+			with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as root:
+				i = 0
+				while True:
+					try:
+						sub = winreg.EnumKey(root, i)
+					except OSError:
+						break
+					i += 1
+					try:
+						with winreg.OpenKey(root, sub) as k:
+							start = winreg.QueryValueEx(k, "LastUsedTimeStart")[0]
+							stop = winreg.QueryValueEx(k, "LastUsedTimeStop")[0]
+						if stop == 0 and start > 0:
+							active.add(sub)
+					except OSError:
+						pass
+		except OSError:
+			pass
+	return active
+
+
+def _micDump():
+	"""Write every microphone-consent entry to the NVDA log (to diagnose detection problems)."""
+	lines = []
+	for path in (MIC_PATH, MIC_PATH.replace("NonPackaged", "")[:-1]):
+		try:
+			with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as root:
+				i = 0
+				while True:
+					try:
+						sub = winreg.EnumKey(root, i)
+					except OSError:
+						break
+					i += 1
+					try:
+						with winreg.OpenKey(root, sub) as k:
+							start = winreg.QueryValueEx(k, "LastUsedTimeStart")[0]
+							stop = winreg.QueryValueEx(k, "LastUsedTimeStop")[0]
+						lines.append("%s | %s | start=%s stop=%s" % (path.split("\\")[-1], sub, start, stop))
+					except OSError:
+						lines.append("%s | %s | (no times)" % (path.split("\\")[-1], sub))
+		except OSError:
+			lines.append("cannot open " + path)
+	log.info("TypelessAccess mic keys:\n" + "\n".join(lines))
+	return len(lines)
+
+
+def _typelessMicOn(cache):
+	"""True while Typeless is listening: the overlay is open or the microphone record says so."""
+	reg = None
+	try:
+		reg = _registryMicOn(cache)
+	except Exception:
+		pass
+	stat = None
+	try:
+		stat = _statusExpanded(cache.setdefault("status", {}))
+	except Exception:
+		pass
+	if reg is None and stat is None:
+		return None
+	return bool(reg) or bool(stat)
+
+
 def _collectTexts(obj, out, depth=0, counter=None):
 	if counter is None:
 		counter = [0]
@@ -228,7 +384,13 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 	def __init__(self, *args, **kwargs):
 		super().__init__(*args, **kwargs)
 		self._running = True
-		self._micOn = None
+		self._micOn = False
+		self._altDown = None
+		self._altClean = True
+		self._tapAnnounce = True
+		self._typelessUp = False
+		self._lastTap = 0.0
+		self._recordingSince = 0.0
 		self._micCache = {}
 		self._lastOff = 0.0
 		self._tick = 0
@@ -238,10 +400,22 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		self._statusHwnd = None
 		self._catcher = None
 		self._autoRead = True
+		try:
+			import inputCore
+			inputCore.decide_handleRawKey.register(self._rawKey)
+			log.info("TypelessAccess: Alt tap hook registered")
+		except Exception:
+			log.debugWarning("Typeless Access: raw key hook unavailable", exc_info=True)
+		threading.Thread(target=self._watchTypeless, daemon=True).start()
 		core.callLater(2000, self._poll)
 
 	def terminate(self):
 		self._running = False
+		try:
+			import inputCore
+			inputCore.decide_handleRawKey.unregister(self._rawKey)
+		except Exception:
+			pass
 		self._stopCatcher()
 		super().terminate()
 
@@ -268,16 +442,88 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	# ---------- polling ----------
 
+	def _watchTypeless(self):
+		"""Keep a cheap flag up to date: is Typeless running? (done off the main thread)"""
+		while self._running:
+			try:
+				self._typelessUp = _typelessAlive()
+			except Exception:
+				pass
+			time.sleep(2.0)
+
+	def _rawKey(self, vkCode=None, scanCode=None, extended=None, pressed=None, **kw):
+		"""Typeless 2.11 starts and stops dictation with a quick tap of the Alt key
+		(it no longer updates the Windows microphone record). Spot a lone right-Alt tap."""
+		try:
+			isAlt = vkCode == 0xA5  # Typeless uses the right Alt key only
+			if pressed:
+				if isAlt:
+					if self._altDown is None:
+						self._altDown = time.time()
+						self._altClean = True
+				else:
+					self._altClean = False
+			elif isAlt:
+				down = self._altDown
+				clean = self._altClean
+				self._altDown = None
+				if down is not None and clean and (time.time() - down) < 1.0:
+					wx.CallAfter(self._altTap, time.time())
+		except Exception:
+			pass
+		return True
+
+	def _altTap(self, eventTime=None):
+		if not self._tapAnnounce or not self._running:
+			return
+		if eventTime is None:
+			eventTime = time.time()
+		if not self._typelessUp:
+			log.info("TypelessAccess: right-Alt tap ignored, Typeless is not running")
+			return
+		# Debounce on the time of the key press itself, not on when we got round to handling it.
+		if eventTime - self._lastTap < 0.35:
+			log.info("TypelessAccess: right-Alt tap ignored (too close to the previous one)")
+			return
+		self._lastTap = eventTime
+		before = self._micOn
+		if self._micOn and eventTime - self._recordingSince > 2.5:
+			# Typeless may have ended the dictation by itself (its overlay is closed again).
+			try:
+				if _statusExpanded(self._micCache.setdefault("status", {})) is False:
+					self._micOn = False
+					self._stopCatcher()
+			except Exception:
+				pass
+		if not self._micOn:
+			self._micOn = True
+			self._recordingSince = eventTime
+			log.info("TypelessAccess: right-Alt tap -> start (was %s)" % before)
+			self._onMicChange(True)
+		else:
+			self._micOn = False
+			log.info("TypelessAccess: right-Alt tap -> stop")
+			self._onMicChange(False)
+
+	@script(
+		description="Typeless: تشغيل أو إيقاف إعلان بدء الإملاء وتوقفه عند نقر Alt",
+		gesture="kb:NVDA+alt+a",
+		category=CATEGORY,
+	)
+	def script_toggleTapAnnounce(self, gesture):
+		self._tapAnnounce = not self._tapAnnounce
+		self._micOn = False
+		ui.message("إعلان الإملاء مفعل" if self._tapAnnounce else "إعلان الإملاء متوقف")
+
 	def _poll(self):
 		if not self._running:
 			return
 		try:
-			on = _typelessMicOn(self._micCache)
-			if on is not None and on != self._micOn:
-				if self._micOn is not None:
-					self._onMicChange(on)
-				self._micOn = on
-			if self._micOn or (time.time() - self._lastOff) < AFTER_STOP_SECONDS:
+			if self._micOn and time.time() - self._recordingSince > 180:
+				# Safety: we lost the second Alt tap; stop waiting for it.
+				self._micOn = False
+				self._onMicChange(False)
+			if not self._micOn and (time.time() - self._lastOff) < AFTER_STOP_SECONDS:
 				self._tick += 1
 				if self._tick % 2 == 0:
 					self._checkStatus()
@@ -299,7 +545,48 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			log.debugWarning("Typeless Access: clipboard catcher failed", exc_info=True)
 			self._catcher = None
 
+	def _prepareCapture(self):
+		"""The slow part of starting: remember the field text and start watching the clipboard."""
+		if not self._micOn:
+			return
+		self._startValue = self._focusText()
+		if self._micOn:
+			self._startCatcher()
+
+	def _focusText(self):
+		try:
+			obj = api.getFocusObject()
+			if obj is None or controlTypes.State.EDITABLE not in obj.states:
+				return None
+			return obj.makeTextInfo(textInfos.POSITION_ALL).text
+		except Exception:
+			return None
+
+	def _fieldFallback(self):
+		"""If the clipboard never showed the text, read what was added to the focused field."""
+		if getattr(self, "_caught", False):
+			return
+		old = getattr(self, "_startValue", None)
+		new = self._focusText()
+		if old is None or new is None or new == old:
+			return
+		p = 0
+		limit = min(len(old), len(new))
+		while p < limit and old[p] == new[p]:
+			p += 1
+		q = 0
+		while q < limit - p and old[len(old) - 1 - q] == new[len(new) - 1 - q]:
+			q += 1
+		added = new[p:len(new) - q].strip()
+		if added:
+			self._caught = True
+			self._lastText = added
+			self._stopCatcher()
+			if self._autoRead:
+				ui.message(added)
+
 	def _onCaughtText(self, text):
+		self._caught = True
 		self._lastText = text
 		self._catcher = None
 		if self._autoRead:
@@ -307,16 +594,20 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 
 	def _onMicChange(self, on):
 		if on:
-			self._stopCatcher()
+			self._caught = False
+			self._startValue = None
 			tones.beep(880, 70)
-			self._seen = set(self._statusTexts())
+			ui.message("بدأ الإملاء")
+			self._seen = set()
 			self._pending = {}
-			core.callLater(700, self._announceMode)
+			core.callLater(60, self._prepareCapture)
 		else:
 			tones.beep(440, 70)
 			ui.message("توقف")
 			self._lastOff = time.time()
-			self._startCatcher()
+			if not getattr(self, "_caught", False) and self._catcher is None:
+				self._startCatcher()
+			core.callLater(1800, self._fieldFallback)
 
 	def _announceMode(self):
 		try:
@@ -390,8 +681,8 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		category=CATEGORY,
 	)
 	def script_reportStatus(self, gesture):
-		on = _typelessMicOn(self._micCache)
-		if on is None:
+		on = bool(self._micOn)
+		if not _typelessAlive():
 			state = "لم أجد Typeless"
 		elif on:
 			state = "Typeless يستمع الآن"
