@@ -2,13 +2,14 @@
 
 An NVDA add-on that makes the Typeless voice dictation app on Windows easier to use for blind NVDA users.
 
-Experimental. Tested with Typeless 2.9.0. Spoken messages are in Arabic.
+Experimental. Tested with Typeless 2.11. Spoken messages are in Arabic.
 
 ## Features
-- Announces when dictation starts and stops, with a short tone.
+- Announces when dictation starts and stops, with a short tone. It follows the quick tap of the right Alt key, the Typeless dictation key.
+- Reads the dictated text back when Typeless has written it.
 - Reads the floating status bar shown while dictating.
 - Saves the last dictated text or answer, and can read it back or copy it.
-- Names the three unlabeled sidebar buttons (Account, Contact us, Settings) in focus and browse mode.
+- Names the unlabeled sidebar buttons (Account, Contact us, Settings, Help) in focus and browse mode.
 - Reads stats, streaks and the Check for updates text when you press Tab.
 - Offers a list of all controls with clear names.
 
@@ -16,7 +17,8 @@ Experimental. Tested with Typeless 2.9.0. Spoken messages are in Arabic.
 - NVDA+Alt+T: read the floating status bar
 - NVDA+Alt+L: read the last saved text
 - NVDA+Alt+C: copy the last saved text
-- NVDA+Alt+R: toggle automatic reading after dictation
+- NVDA+Alt+R: toggle automatic reading of the dictated text
+- NVDA+Alt+A: toggle the start and stop announcements (the text is still read)
 - NVDA+Alt+9: read your stats and streaks without opening the app
 
 ## Shortcuts, inside the Typeless window
@@ -30,6 +32,9 @@ All shortcuts can be changed in NVDA menu, Preferences, Input gestures, Typeless
 
 ## Install
 Download the .nvda-addon file from the Releases page, open it, confirm, and restart NVDA.
+
+## The dictation key
+The add-on knows that dictation started or stopped from a quick tap of the right Alt key, so keep right Alt as the Typeless dictation key. Left Alt is ignored. Holding the key down, or pressing it together with another key, is not counted as a tap.
 
 ## Changing the Typeless dictation key
 That key belongs to Typeless. In Typeless Settings, under Keyboard shortcuts, activate the shortcut beside Dictate and press the key you want, for example Right Alt.

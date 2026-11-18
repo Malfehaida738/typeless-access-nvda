@@ -3,12 +3,15 @@
 # This file is covered by the GNU General Public License, version 2 or later.
 # See the file LICENSE for more details.
 
-# -*- coding: utf-8 -*-
 # Typeless Access - app module for the Typeless main window.
 # Adds: a list of all controls with clear names (NVDA+Alt+E),
-# and Alt+1..Alt+7 to jump to the main pages.
+# Alt+1..Alt+9 to jump to the main pages and read the stats,
+# and names for the sidebar icons that Typeless leaves unnamed.
 
 import re
+import time
+import ctypes
+from ctypes import wintypes
 import wx
 import gui
 import api
@@ -27,11 +30,18 @@ TIME_RE = re.compile(r"^\d{1,2}:\d{2}\s?(AM|PM)$", re.IGNORECASE)
 
 Role = controlTypes.Role
 State = controlTypes.State
+# On/off switches have their own role and state in recent NVDA versions.
+ROLE_SWITCH = getattr(Role, "SWITCH", None)
+STATE_ON = getattr(State, "ON", None)
+STATE_PRESSED = getattr(State, "PRESSED", None)
+OBJID_CLIENT = -4
 CONTROL_ROLES = {
 	Role.BUTTON, Role.CHECKBOX, Role.COMBOBOX, Role.LINK, Role.TAB,
 	Role.MENUITEM, Role.RADIOBUTTON, Role.TOGGLEBUTTON, Role.EDITABLETEXT,
 	Role.SLIDER,
 }
+if ROLE_SWITCH is not None:
+	CONTROL_ROLES.add(ROLE_SWITCH)
 ROLE_WORDS = {
 	Role.BUTTON: "زر",
 	Role.CHECKBOX: "خانة اختيار",
@@ -44,24 +54,43 @@ ROLE_WORDS = {
 	Role.EDITABLETEXT: "حقل نص",
 	Role.SLIDER: "منزلق",
 }
+if ROLE_SWITCH is not None:
+	ROLE_WORDS[ROLE_SWITCH] = "مفتاح تبديل"
 SIDEBAR_ICONS = [
 	("account", "الحساب (Account)"),
 	("contact", "تواصل معنا (Contact us)"),
 	("settings", "الإعدادات (Settings)"),
 ]
+HELP_ICON = ("help", "المساعدة (Help)")
+# Button name -> the page it opens. Includes the names this add-on gives the unnamed icons.
+NAME_KEYS = {
+	"Home": "home",
+	"History": "history",
+	"Dictionary": "dictionary",
+	HELP_NAME: "help",
+	"Check for updates": "updates",
+	HELP_ICON[1]: HELP_ICON[0],
+}
+NAME_KEYS.update({label: key for key, label in SIDEBAR_ICONS})
+
+# Our own handle to user32, with full 64-bit window handles
+# (the shared ctypes.windll.user32 has no declared types and cuts them to 32 bits).
+_user32 = ctypes.WinDLL("user32", use_last_error=True)
+_user32.FindWindowExW.argtypes = [wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR]
+_user32.FindWindowExW.restype = wintypes.HWND
+_user32.GetForegroundWindow.argtypes = []
+_user32.GetForegroundWindow.restype = wintypes.HWND
 
 
 def _typelessRoot():
 	"""The web document of the Typeless window. The top-level window object has no children
 	to walk in Typeless 2.11, so go to the Chromium render widget (or climb from the focus)."""
 	try:
-		import ctypes
-		import winUser
 		from NVDAObjects.IAccessible import getNVDAObjectFromEvent
-		hwnd = winUser.getForegroundWindow()
-		child = ctypes.windll.user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None)
+		hwnd = _user32.GetForegroundWindow()
+		child = _user32.FindWindowExW(hwnd, None, "Chrome_RenderWidgetHostHWND", None) if hwnd else None
 		if child:
-			obj = getNVDAObjectFromEvent(child, winUser.OBJID_CLIENT, 0)
+			obj = getNVDAObjectFromEvent(child, OBJID_CLIENT, 0)
 			if obj is not None:
 				return obj
 	except Exception:
@@ -81,6 +110,34 @@ def _typelessRoot():
 	except Exception:
 		pass
 	return api.getForegroundObject()
+
+
+_rootCache = {}
+
+
+def _rootFor(obj):
+	"""The web document that holds obj. Taken from the object's own window, so it is right
+	even when Typeless is not the foreground window (stats read from another program)."""
+	try:
+		hwnd = obj.windowHandle
+	except Exception:
+		hwnd = None
+	if hwnd:
+		now = time.time()
+		hit = _rootCache.get(hwnd)
+		if hit is not None and 0 <= now - hit[1] < 2.0:
+			return hit[0]
+		try:
+			from NVDAObjects.IAccessible import getNVDAObjectFromEvent
+			root = getNVDAObjectFromEvent(hwnd, OBJID_CLIENT, 0)
+		except Exception:
+			root = None
+		if root is not None:
+			if len(_rootCache) > 20:
+				_rootCache.clear()
+			_rootCache[hwnd] = (root, now)
+			return root
+	return _typelessRoot()
 
 
 NAV_TEXT = {
@@ -181,10 +238,13 @@ class _Collector(object):
 		self.runContext = []
 		self.runFirstName = ""
 		self.count = 0
+		self.root = None
 
 	def walk(self, obj, depth=0):
 		if obj is None or depth > 60 or self.count > 5000:
 			return
+		if depth == 0 and self.root is None:
+			self.root = obj
 		self.count += 1
 		try:
 			role = obj.role
@@ -194,7 +254,7 @@ class _Collector(object):
 		if role in CONTROL_ROLES:
 			self._addControl(obj, role, name)
 			return
-		if name == "Check for updates" and role not in CONTROL_ROLES:
+		if name == "Check for updates":
 			self.items.append({"label": "البحث عن تحديثات (Check for updates)", "obj": obj, "key": "updates", "role": Role.BUTTON})
 			return
 		if role == Role.STATICTEXT and name:
@@ -229,7 +289,7 @@ class _Collector(object):
 		if name:
 			label = name
 			if role == Role.BUTTON:
-				key = {"Home": "home", "History": "history", "Dictionary": "dictionary", HELP_NAME: "help", "Check for updates": "updates"}.get(name) or {i[1]: i[0] for i in SIDEBAR_ICONS}.get(name)
+				key = NAME_KEYS.get(name)
 				if name == HELP_NAME:
 					label = "المساعدة وميزات البرنامج وملاحظات الإصدار (Help)"
 				elif name == "Add another" and context:
@@ -274,7 +334,7 @@ class _Collector(object):
 		return "بلا اسم", None
 
 	def _sidebarIcon(self, obj):
-		return _sidebarIcon(obj)
+		return _sidebarIcon(obj, self.root)
 
 
 def _rawName(obj):
@@ -291,6 +351,7 @@ def _rawName(obj):
 
 _sidebarCache = {}
 _helpCache = {}
+_helpMissed = {}
 _diag = [0]
 
 
@@ -314,6 +375,11 @@ def _findHelpButton(root):
 				return cached
 		except Exception:
 			pass
+	# Typeless 2.11 has no such button: do not walk the whole window again for every icon.
+	missed = _helpMissed.get(hwnd)
+	now = time.time()
+	if missed is not None and 0 <= now - missed < 10.0:
+		return None
 	stack = [root]
 	count = 0
 	while stack and count < 1500:
@@ -331,6 +397,7 @@ def _findHelpButton(root):
 			stack.extend(reversed(kids))
 		except Exception:
 			continue
+	_helpMissed[hwnd] = now
 	return None
 
 
@@ -386,15 +453,37 @@ def _iconByGeometry(obj, root):
 	return None
 
 
-def _sidebarIcon(obj, root=None):
-	"""For the 3 unnamed icons beside the Help button: returns (key, label) or None."""
+def _iconCacheKey(obj):
+	"""(window, node id) when the node has a lasting id, else (window, place on screen).
+	Returns the key and whether it is a lasting one."""
+	try:
+		hwnd = obj.windowHandle
+	except Exception:
+		return None, False
+	try:
+		uid = obj.IA2UniqueID
+	except Exception:
+		uid = None
+	if uid is not None:
+		return (hwnd, "id", uid), True
 	try:
 		loc = obj.location
-		cacheKey = (obj.windowHandle, tuple(loc) if loc else None)
 	except Exception:
-		cacheKey = None
-	if cacheKey is not None and cacheKey in _sidebarCache:
-		return _sidebarCache[cacheKey]
+		loc = None
+	if not loc:
+		return None, False
+	return (hwnd, "loc", tuple(loc)), False
+
+
+def _sidebarIcon(obj, root=None):
+	"""For the unnamed icons beside the Help button: returns (key, label) or None."""
+	cacheKey, lasting = _iconCacheKey(obj)
+	now = time.time()
+	if cacheKey is not None:
+		hit = _sidebarCache.get(cacheKey)
+		# Answers expire: the page changes, and the window can be moved or resized.
+		if hit is not None and 0 <= now - hit[1] < hit[2]:
+			return hit[0]
 	result = None
 	try:
 		parent = obj.parent
@@ -420,7 +509,7 @@ def _sidebarIcon(obj, root=None):
 		elif len(siblings) == 4 and all(o.location and o.location[2] <= 100 for o in siblings):
 			# Typeless 2.11: the Help button has no name any more, so there are 4 unnamed icons.
 			siblings.sort(key=lambda o: o.location[0])
-			icons = SIDEBAR_ICONS + [("help", "المساعدة (Help)")]
+			icons = SIDEBAR_ICONS + [HELP_ICON]
 			for i, s in enumerate(siblings):
 				if s == obj:
 					result = icons[i]
@@ -430,16 +519,19 @@ def _sidebarIcon(obj, root=None):
 	if result is None:
 		if root is None:
 			try:
-				root = _typelessRoot()
+				root = _rootFor(obj)
 			except Exception:
 				root = None
 		try:
 			result = _iconByGeometry(obj, root)
 		except Exception:
 			result = None
-	_diagLog("unnamed button at %s -> %s" % (cacheKey[1] if cacheKey else None, result[1] if result else None))
-	if cacheKey is not None and cacheKey[1] is not None and len(_sidebarCache) < 500:
-		_sidebarCache[cacheKey] = result
+	_diagLog("unnamed button %s -> %s" % (cacheKey[1:] if cacheKey else None, result[1] if result else None))
+	if cacheKey is not None:
+		if len(_sidebarCache) > 500:
+			_sidebarCache.clear()
+		ttl = 30.0 if lasting else 3.0
+		_sidebarCache[cacheKey] = (result, now, ttl)
 	return result
 
 
@@ -456,6 +548,7 @@ class SidebarIconButton(NVDAObject):
 
 
 _TypelessVBuf = None
+_browseLabelCache = {}
 try:
 	from NVDAObjects.IAccessible.chromium import ChromeVBuf as _BaseVBuf
 
@@ -471,13 +564,24 @@ try:
 				if attrs.get("role") == Role.BUTTON and not (attrs.get("name") or "").strip():
 					docHandle = int(attrs.get("controlIdentifier_docHandle"))
 					ID = int(attrs.get("controlIdentifier_ID"))
-					buf = self.obj
-					obj = buf.getNVDAObjectFromIdentifier(docHandle, ID)
-					root = getattr(buf, "rootNVDAObject", None)
-					found = _sidebarIcon(obj, root) if obj else None
-					if found:
-						attrs["_typelessLabel"] = found[1]
-						_diagLog("browse label %s" % found[1])
+					now = time.time()
+					hit = _browseLabelCache.get((docHandle, ID))
+					if hit is not None and 0 <= now - hit[1] < hit[2]:
+						label = hit[0]
+					else:
+						# Building the object is the slow part: remember the answer for a while.
+						buf = self.obj
+						obj = buf.getNVDAObjectFromIdentifier(docHandle, ID)
+						root = getattr(buf, "rootNVDAObject", None)
+						found = _sidebarIcon(obj, root) if obj else None
+						label = found[1] if found else None
+						if len(_browseLabelCache) > 500:
+							_browseLabelCache.clear()
+						_browseLabelCache[(docHandle, ID)] = (label, now, 30.0 if label else 3.0)
+						if label:
+							_diagLog("browse label %s" % label)
+					if label:
+						attrs["_typelessLabel"] = label
 			except Exception:
 				log.debugWarning("TypelessAccess normalize", exc_info=True)
 			return attrs
@@ -537,6 +641,19 @@ class TypelessDocument(NVDAObject):
 		return super().treeInterceptorClass
 
 
+def _stateWord(role, states):
+	"""The spoken on/off state of a checkbox, switch or toggle button ("" for other controls)."""
+	if role == Role.CHECKBOX:
+		return "محددة" if State.CHECKED in states else "غير محددة"
+	if ROLE_SWITCH is not None and role == ROLE_SWITCH:
+		on = (STATE_ON is not None and STATE_ON in states) or State.CHECKED in states
+		return "مشغّل" if on else "متوقف"
+	if role == Role.TOGGLEBUTTON:
+		on = (STATE_PRESSED is not None and STATE_PRESSED in states) or State.CHECKED in states
+		return "مضغوط" if on else "غير مضغوط"
+	return ""
+
+
 def _describe(item):
 	obj = item["obj"]
 	role = item["role"]
@@ -546,8 +663,9 @@ def _describe(item):
 		states = obj.states
 	except Exception:
 		states = set()
-	if role == Role.CHECKBOX:
-		word += " محددة" if State.CHECKED in states else " غير محددة"
+	stateWord = _stateWord(role, states)
+	if stateWord:
+		word += " " + stateWord
 	elif role == Role.COMBOBOX:
 		try:
 			value = obj.value
@@ -589,6 +707,7 @@ def _activate(item):
 	obj = item["obj"]
 	try:
 		if item.get("key") == "updates":
+			# The clickable part may be the text itself or one of its parents.
 			target = obj
 			for attempt in range(4):
 				try:
@@ -598,16 +717,19 @@ def _activate(item):
 					target = target.parent
 					if target is None:
 						raise
+			else:
+				raise RuntimeError("no clickable parent")
 		else:
 			obj.doAction()
 	except Exception:
 		log.debugWarning("Typeless Access: doAction failed", exc_info=True)
 		ui.message("تعذر تفعيل العنصر")
 		return
-	if item["role"] in (Role.CHECKBOX, Role.TOGGLEBUTTON):
+	role = item["role"]
+	if _stateWord(role, set()):
 		def report():
 			try:
-				ui.message("محددة" if State.CHECKED in obj.states else "غير محددة")
+				ui.message(_stateWord(role, obj.states))
 			except Exception:
 				pass
 		core.callLater(400, report)
@@ -805,18 +927,15 @@ class AppModule(appModuleHandler.AppModule):
 				except Exception:
 					ui.message("تعذر فتح " + spoken)
 				return
+		ui.message("لم أجد " + spoken + " في هذه الشاشة")
 		try:
+			# Leave a trace in the NVDA log: it shows what a new Typeless version changed.
 			_dumpTree(_typelessRoot())
 		except Exception:
 			log.debugWarning("Typeless Access: dump failed", exc_info=True)
-		ui.message("لم أجد " + spoken + " في هذه الشاشة")
 
 	@script(description="Typeless: قائمة بكل عناصر النافذة بأسماء واضحة", gesture="kb:NVDA+alt+e", category=CATEGORY)
 	def script_elementsList(self, gesture):
-		try:
-			_dumpTree(_typelessRoot())
-		except Exception:
-			log.debugWarning("Typeless Access: dump failed", exc_info=True)
 		try:
 			items = self._collect()
 		except Exception:
