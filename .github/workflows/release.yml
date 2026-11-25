@@ -1,0 +1,27 @@
+name: Attach add-on to release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Build the add-on package
+        run: |
+          VERSION="${TAG#v}"
+          zip -qr "typelessAccess-${VERSION}.nvda-addon" manifest.ini appModules globalPlugins doc LICENSE -x "*/__pycache__/*"
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+      - name: Attach the package to the release
+        run: gh release upload "$TAG" typelessAccess-*.nvda-addon --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
