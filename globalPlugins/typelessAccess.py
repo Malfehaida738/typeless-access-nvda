@@ -362,10 +362,24 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 		"""Keep a cheap flag up to date: is Typeless running? (done off the main thread)"""
 		while self._running:
 			try:
-				self._typelessUp = _typelessAlive()
+				up = _typelessAlive()
+				# Typeless closed (an update restarts it): the start/stop state we remember
+				# is no longer true, so forget it.
+				if not up and self._typelessUp:
+					wx.CallAfter(self._onTypelessRestart)
+				self._typelessUp = up
 			except Exception:
 				pass
-			time.sleep(2.0)
+			time.sleep(1.0)
+
+	def _onTypelessRestart(self):
+		"""Forget the dictation state when Typeless restarts, so the next tap is read as a start."""
+		if not self._running:
+			return
+		log.info("TypelessAccess: Typeless restarted or closed, dictation state reset")
+		self._micOn = False
+		self._session += 1
+		self._stopCatcher()
 
 	def _rawKey(self, vkCode=None, scanCode=None, extended=None, pressed=None, **kw):
 		"""Typeless 2.11 starts and stops dictation with a quick tap of the right Alt key
@@ -396,6 +410,14 @@ class GlobalPlugin(globalPluginHandler.GlobalPlugin):
 			return
 		if eventTime is None:
 			eventTime = time.time()
+		if not self._typelessUp:
+			# The background check can be up to a second behind (right after Typeless starts):
+			# ask again now instead of dropping the tap, which would flip start and stop.
+			try:
+				if _typelessAlive():
+					self._typelessUp = True
+			except Exception:
+				pass
 		if not self._typelessUp:
 			log.info("TypelessAccess: right-Alt tap ignored, Typeless is not running")
 			return

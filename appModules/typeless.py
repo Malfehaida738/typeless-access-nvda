@@ -362,6 +362,28 @@ def _diagLog(msg):
 		log.info("TypelessAccess: " + msg)
 
 
+_layoutLogged = [0.0]
+
+
+def _layoutLog(hasHelp, siblings):
+	"""When an icon cannot be named, record how its row looks (at most once a minute, outside the
+	normal budget): it shows how a new Typeless version arranged the sidebar buttons."""
+	now = time.time()
+	if 0 <= now - _layoutLogged[0] < 60.0:
+		return
+	_layoutLogged[0] = now
+	try:
+		places = []
+		for s in siblings:
+			try:
+				places.append(tuple(s.location) if s.location else None)
+			except Exception:
+				places.append(None)
+		log.info("TypelessAccess: icon row layout: help named=%s, unnamed buttons=%d, places=%s" % (hasHelp, len(siblings), places))
+	except Exception:
+		pass
+
+
 def _findHelpButton(root):
 	"""Find the Help button (the one with the long name) under root, cached per window."""
 	try:
@@ -485,10 +507,10 @@ def _sidebarIcon(obj, root=None):
 		if hit is not None and 0 <= now - hit[1] < hit[2]:
 			return hit[0]
 	result = None
+	siblings = []
+	hasHelp = False
 	try:
 		parent = obj.parent
-		siblings = []
-		hasHelp = False
 		child = parent.firstChild
 		n = 0
 		while child is not None and n < 30:
@@ -527,6 +549,8 @@ def _sidebarIcon(obj, root=None):
 		except Exception:
 			result = None
 	_diagLog("unnamed button %s -> %s" % (cacheKey[1:] if cacheKey else None, result[1] if result else None))
+	if result is None:
+		_layoutLog(hasHelp, siblings)
 	if cacheKey is not None:
 		if len(_sidebarCache) > 500:
 			_sidebarCache.clear()
@@ -833,7 +857,13 @@ class AppModule(appModuleHandler.AppModule):
 		super().__init__(*args, **kwargs)
 		self._lastFocus = None
 		self._tabDir = 0
-		_diagLog("app module loaded, browse mode labels %s" % ("ready" if _TypelessVBuf is not None else "unavailable"))
+		# Every Typeless launch gets a fresh budget of log lines, and the log says which version it is.
+		_diag[0] = 0
+		try:
+			version = self.productVersion
+		except Exception:
+			version = "?"
+		_diagLog("app module loaded, Typeless %s, browse mode labels %s" % (version, "ready" if _TypelessVBuf is not None else "unavailable"))
 
 	# ---------- Tab reads the text it skips ----------
 
